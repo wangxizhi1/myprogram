@@ -1,0 +1,61 @@
+#1.用sceasyR包将scanpy的h5ad文件转为seurat的rds文件
+BiocManager::install(c("LoomExperiment", "SingleCellExperiment"), update=F)
+install.packages('reticulate')
+devtools::install_github("cellgeni/sceasy")
+
+#然后在python上装anndata模块
+sceasy::convertFormat(h5ad_file, from="anndata", to="seurat", outFile='filename.rds')
+#然后就能得到seurat文件
+
+#2.下载monocle，seurat包，读取rds文件，然后转为monocle使用的CDS文件
+library(sceasy)
+library(reticulate)
+library(Biobase)
+library(VGAM)
+library(dplyr)
+library(monocle)
+data<-readRDS("D:/scanpy example/adata_desc01.rds") #导入seurat文件
+CDS<-Seurat::as.CellDataSet(data)
+CDS@expressionFamily<-negbinomial.size() #这个函数没有把expressionFamily改成负二项分布，表达矩阵是counts值，因此要手动更改
+#归一化
+CDS <- estimateSizeFactors(CDS) #标准化细胞之间mRNA差异
+CDS <- estimateDispersions(CDS) #分散度值帮助后续差异分析
+
+#3.筛选基因，标准不一定是这个
+CDS<- detectGenes(CDS, min_expr = 0.1)
+expressed_genes <- row.names(subset(fData(CDS),num_cells_expressed >= 10) )#过滤掉低质量基因，10可更改
+CDS<- CDS[expressed_genes,]
+valid_cells <- row.names(pData(CDS)[pData(CDS)$num_genes_expressed>=50,] )#过滤掉低质量细胞，50可更改
+CDS<- CDS[,valid_cells]
+
+#4.1聚类分析order基因
+disp_table <- dispersionTable(CDS)  #dispersionTable() 目的是判断每个聚类用来order的feature基因。当然可以使用全部基因，但这会掺杂很多表达量不高而检测不出来的基因，反而会增加噪音。最好是挑有差异的，挑表达量不太低的
+unsup_clustering_genes <- subset(disp_table, mean_expression >= 0.1) #只要表达均值在0.1及以上的基因
+CDS <- setOrderingFilter(CDS, unsup_clustering_genes$gene_id) #准备聚类名单
+plot_ordering_genes(CDS) #用于查看order基因和非order基因平局表达量的分布点图
+
+#4.1.1进行聚类
+CDS2 <- reduceDimension(CDS, max_components = 2, num_dim = 6,
+                        reduction_method = 'tSNE', verbose = T)
+CDS2 <- clusterCells(CDS2, num_clusters = 8) #(8-1)为聚类堆数
+plot_cell_clusters(CDS2, 1, 2, color = "Cluster")
+
+#4.2轨迹分析order基因
+diff_test_res <- differentialGeneTest(CDS,fullModelFormulaStr = "~louvain") #fullModelFormulaStr选择聚类结果
+sig_genes <- subset(diff_test_res, qval < 0.1)
+dim(sig_genes)
+ordering_genes <- row.names (subset(diff_test_res, qval < 0.01))
+CDS <- setOrderingFilter(CDS, ordering_genes)
+plot_ordering_genes(CDS)
+                    
+                    
+#5.降维分析，使用monocle包中自带的DDRTree的方法（这几种方法专门为细胞轨迹分析使用）（monocle还带有densityPeak（默认）/louvain（大型数据）两种方法）
+CDS <- reduceDimension(
+CDS,
+max_components = 2,
+method = 'DDRTree')
+                    
+#6.可视化
+CDS <- orderCells(CDS)
+plot_cell_trajectory(CDS) #可以加上color_by="Pseudotime",根据伪时间表示；加上color_by="louvain"根据聚类显示轨迹；加上theta=180旋转角度
++scale_color_gradient2(low="#66ccff",mid = "#006699",high="black",midpoint =5) #改变拟时间颜色显示顺序
